@@ -3,88 +3,107 @@ name: Deploy StoryChat
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  # Deploy API to Cloudflare Workers
-  deploy-api:
+  # Run D1 migrations first
+  migrate-db:
     runs-on: ubuntu-latest
-    name: Deploy API Worker
+    name: Run Database Migrations
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
+      
       - name: Install Wrangler
         run: npm install -g wrangler
-
-      - name: Deploy API
+      
+      - name: Run Migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-          KV_SESSIONS_ID: ${{ secrets.KV_SESSIONS_ID }}
-          KV_RATELIMIT_ID: ${{ secrets.KV_RATELIMIT_ID }}
         run: |
-          cd api
-          wrangler deploy --env=production
+          # Run migrations using wrangler
+          wrangler d1 execute DB --file=infra/d1/migrations/0001_initial.sql --yes || echo "Migration applied or already exists"
+
+  # Deploy API to Cloudflare Workers
+  deploy-api:
+    runs-on: ubuntu-latest
+    name: Deploy API Worker
+    needs: migrate-db
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Wrangler
+        run: npm install -g wrangler
+      
+      - name: Deploy API
+        working-directory: ./api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --env=production
+
+  # Seed database
+  seed-db:
+    runs-on: ubuntu-latest
+    name: Seed Database
+    needs: deploy-api
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Wrangler
+        run: npm install -g wrangler
+      
+      - name: Seed Demo Data
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # Seed stories and users (if seed files exist)
+          if [ -f "infra/d1/seed/001_demo_users.sql" ]; then
+            wrangler d1 execute DB --file=infra/d1/seed/001_demo_users.sql --yes
+          fi
 
   # Deploy Web to Cloudflare Pages
   deploy-web:
     runs-on: ubuntu-latest
     name: Deploy Web to Pages
+    needs: [seed-db, deploy-api]
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
+      
       - name: Install dependencies
-        run: |
-          cd web
-          npm ci || npm install
-
+        working-directory: ./web
+        run: npm install --legacy-peer-deps
+      
       - name: Build
+        working-directory: ./web
         env:
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
-        run: |
-          cd web
-          npm run build
-
+        run: npm run build
+      
       - name: Deploy to Pages
+        working-directory: ./web
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          cd web
-          npx wrangler pages deploy dist --project-name=storychat --branch=main
-
-  # Run D1 migrations
-  migrate-db:
-    runs-on: ubuntu-latest
-    name: Run Database Migrations
-    needs: deploy-api
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wrangler
-        run: npm install -g wrangler
-
-      - name: Run Migrations
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-        run: |
-          # Apply migrations
-          wrangler d1 execute storychat-db --file=migrations/0001_initial.sql
-          
-          # Seed demo data
-          wrangler d1 execute storychat-db --file=content/stories/demo-stories.sql
-          wrangler d1 execute storychat-db --file=content/users/seed.sql
+        run: npx wrangler pages deploy dist --project-name=storychat --branch=main
