@@ -1,211 +1,192 @@
-// Auth routes: Login, Google OAuth, email/password
-
-import type { Env } from '../index';
-import { createCORSResponse, parseBody, signJWT } from '../index';
+/**
+ * Auth Routes - Hono Router
+ * Endpoints: POST /api/auth/login, POST /api/auth/register
+ */
+import { Hono } from 'hono';
 import { generateId, hashPassword, verifyPassword } from '../lib/crypto';
+import type { Env } from '../index';
 
-// Google OAuth exchange
-async function exchangeGoogleCode(code: string, clientId: string, clientSecret: string): Promise<{ email: string; sub: string; name?: string } | null> {
-  try {
-    // In production, this would call Google's token endpoint
-    // For MVP we'll simulate or use a proxy
-    const response = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'authorization_code',
-        redirect_uri: 'https://storychat.pages.dev/auth/callback'
-      })
-    });
+// Extend Hono context type
+type AuthContext = {
+  Bindings: Env;
+};
 
-    if (!response.ok) {
-      console.log('Google token exchange failed, using mock for development');
-      return null;
-    }
+const auth = new Hono<AuthContext>();
 
-    const tokenData = await response.json();
-    
-    // Get user info from Google
-    const userInfo = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` }
-    });
-    
-    const user = await userInfo.json();
-    return {
-      email: user.email,
-      sub: user.sub,
-      name: user.name
-    };
-  } catch (error) {
-    console.error('Google OAuth error:', error);
-    return null;
-  }
+// JWT signing helper
+async function signJWT(payload: object, secret: string): Promise<string> {
+  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const body = btoa(JSON.stringify(payload));
+  const data = new TextEncoder().encode(`${header}.${body}`);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, data);
+  const sig = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `${header}.${body}.${sig}`;
 }
 
-export async function authRoutes(request: Request, env: Env, path: string, method: string): Promise<Response> {
-  const db = env.DB;
+// POST /api/auth/login - Email/Password login
+auth.post('/login', async (c) => {
+  const db = c.env.DB;
+  const JWT_SECRET = c.env.JWT_SECRET;
 
-  // POST /api/auth/login - Email/Password login
-  if (path === '/api/auth/login' && method === 'POST') {
-    try {
-      const body = await parseBody<{ email: string; password: string }>(request);
-      const { email, password } = body;
+  try {
+    const body = await c.req.json<{ email: string; password: string }>();
+    const { email, password } = body;
 
-      if (!email || !password) {
-        return createCORSResponse({ error: 'Email and password required' }, 400, env.CORS_ORIGIN);
-      }
+    if (!email || !password) {
+      return c.json({ error: 'Email and password required' }, 400);
+    }
 
-      // Find user
-      const user = await db.prepare(
+    // Find user
+    const user = await db
+      .prepare(
         'SELECT id, email, password_hash, is_admin, display_name FROM users WHERE email = ? AND auth_provider = "email"'
-      ).bind(email).first<{ id: string; email: string; password_hash: string; is_admin: number; display_name: string }>();
+      )
+      .bind(email)
+      .first<{
+        id: string;
+        email: string;
+        password_hash: string;
+        is_admin: number;
+        display_name: string;
+      }>();
 
-      if (!user || !user.password_hash) {
-        return createCORSResponse({ error: 'Invalid credentials' }, 401, env.CORS_ORIGIN);
-      }
+    if (!user || !user.password_hash) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
 
-      // Verify password
-      const passwordValid = await verifyPassword(password, user.password_hash);
-      if (!passwordValid) {
-        return createCORSResponse({ error: 'Invalid credentials' }, 401, env.CORS_ORIGIN);
-      }
+    // Verify password
+    const passwordValid = await verifyPassword(password, user.password_hash);
+    if (!passwordValid) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
 
-      // Create session
-      const sessionId = generateId();
-      const token = await signJWT({
+    // Create session
+    const sessionId = generateId();
+    const token = await signJWT(
+      {
         userId: user.id,
         email: user.email,
         isAdmin: user.is_admin === 1,
-        sessionId
-      }, env.JWT_SECRET);
+        sessionId,
+      },
+      JWT_SECRET
+    );
 
-      // Store session in KV
-      await env.SESSIONS.put(
-        `session:${sessionId}`,
-        JSON.stringify({ userId: user.id, createdAt: Date.now() }),
-        { expirationTtl: 86400 } // 24 hours
-      );
+    // Store session in KV
+    await c.env.SESSIONS.put(
+      `session:${sessionId}`,
+      JSON.stringify({ userId: user.id, createdAt: Date.now() }),
+      { expirationTtl: 86400 } // 24 hours
+    );
 
-      // Update last login
-      await db.prepare('UPDATE users SET last_login_at = datetime("now") WHERE id = ?').bind(user.id).run();
+    // Update last login
+    await db
+      .prepare('UPDATE users SET last_login_at = datetime("now") WHERE id = ?')
+      .bind(user.id)
+      .run();
 
-      return createCORSResponse({
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          displayName: user.display_name || user.email.split('@')[0],
-          isAdmin: user.is_admin === 1
-        }
-      }, 200, env.CORS_ORIGIN);
-    } catch (error) {
-      return createCORSResponse({ error: error.message || 'Login failed' }, 500, env.CORS_ORIGIN);
-    }
-  }
-
-  // POST /api/auth/google - Google OAuth login
-  if (path === '/api/auth/google' && method === 'POST') {
-    try {
-      const body = await parseBody<{ code: string }>(request);
-      const { code } = body;
-
-      if (!code) {
-        return createCORSResponse({ error: 'OAuth code required' }, 400, env.CORS_ORIGIN);
-      }
-
-      // Exchange code for Google user info
-      const googleUser = await exchangeGoogleCode(code, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET);
-
-      // For development: mock Google user if OAuth fails
-      let email = googleUser?.email;
-      let googleId = googleUser?.sub;
-      let displayName = googleUser?.name;
-
-      // Development fallback
-      if (!email) {
-        email = `user_${Date.now()}@storychat.dev`;
-        googleId = `google_${Date.now()}`;
-        displayName = 'StoryChat User';
-      }
-
-      // Check if user exists
-      let user = await db.prepare(
-        'SELECT id, email, is_admin, display_name FROM users WHERE auth_provider_id = ? AND auth_provider = "google"'
-      ).bind(googleId).first<{ id: string; email: string; is_admin: number; display_name: string }>();
-
-      if (!user) {
-        // Create new user
-        const userId = generateId();
-        await db.prepare(`
-          INSERT INTO users (id, email, display_name, auth_provider, auth_provider_id, subscription_tier, created_at)
-          VALUES (?, ?, ?, 'google', ?, 'free', datetime('now'))
-        `).bind(userId, email, displayName || email.split('@')[0], googleId).run();
-
-        // Give welcome credits (50 starting per PRD)
-        await db.prepare(`
-          INSERT INTO credit_transactions (transaction_id, user_id, transaction_type, credits_amount, balance_after, idempotency_key, reason, created_at)
-          VALUES (?, ?, 'BONUS', 50, 50, ?, 'Welcome bonus', datetime('now'))
-        `).bind(`tx_${Date.now()}`, userId, `welcome_${userId}`).run();
-
-        user = { id: userId, email, is_admin: 0, display_name: displayName };
-      }
-
-      // Create session
-      const sessionId = generateId();
-      const token = await signJWT({
-        userId: user.id,
+    return c.json({
+      token,
+      user: {
+        id: user.id,
         email: user.email,
+        displayName: user.display_name || user.email.split('@')[0],
         isAdmin: user.is_admin === 1,
-        sessionId
-      }, env.JWT_SECRET);
-
-      await env.SESSIONS.put(
-        `session:${sessionId}`,
-        JSON.stringify({ userId: user.id, createdAt: Date.now() }),
-        { expirationTtl: 86400 }
-      );
-
-      // Update last login
-      await db.prepare('UPDATE users SET last_login_at = datetime("now") WHERE id = ?').bind(user.id).run();
-
-      return createCORSResponse({
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          displayName: user.display_name || user.email.split('@')[0],
-          isAdmin: user.is_admin === 1
-        },
-        newUser: !googleUser // true if we created user this session
-      }, 200, env.CORS_ORIGIN);
-    } catch (error) {
-      return createCORSResponse({ error: error.message || 'Google login failed' }, 500, env.CORS_ORIGIN);
-    }
+      },
+    });
+  } catch (error: any) {
+    return c.json({ error: error.message || 'Login failed' }, 500);
   }
+});
 
-  // POST /api/auth/register - Create email/password account
-  if (path === '/api/auth/register' && method === 'POST') {
-    try {
-      const body = await parseBody<{ email: string; password: string; displayName?: string }>(request);
-      const { email, password, displayName } = body;
+// POST /api/auth/register - Create email/password account
+auth.post('/register', async (c) => {
+  const db = c.env.DB;
+  const JWT_SECRET = c.env.JWT_SECRET;
 
-      if (!email || !password || password.length < 6) {
-        return createCORSResponse({ error: 'Valid email and password (6+ chars) required' }, 400, env.CORS_ORIGIN);
-      }
+  try {
+    const body = await c.req.json<{
+      email: string;
+      password: string;
+      displayName?: string;
+    }>();
+    const { email, password, displayName } = body;
 
-      // Check if email exists
-      const existing = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
-      if (existing) {
-        return createCORSResponse({ error: 'Email already registered' }, 409, env.CORS_ORIGIN);
-      }
+    if (!email || !password || password.length < 6) {
+      return c.json(
+        { error: 'Valid email and password (6+ chars) required' },
+        400
+      );
+    }
 
-      // Create user
-      const userId = generateId();
-      const passwordHash = await hashPassword(password);
+    // Check if email exists
+    const existing = await db
+      .prepare('SELECT id FROM users WHERE email = ?')
+      .bind(email)
+      .first();
+    if (existing) {
+      return c.json({ error: 'Email already registered' }, 409);
+    }
 
-      await db.prepare(`
-        INSERT INTO users (id, email, display_name, auth_provider, password_hash, subscription_tier, created_at)
-        VALUES (?, ?, ?, 'email', ?,
+    // Create user
+    const userId = generateId();
+    const passwordHash = await hashPassword(password);
+
+    await db
+      .prepare(
+        `INSERT INTO users (id, email, display_name, auth_provider, password_hash, subscription_tier, created_at)
+         VALUES (?, ?, ?, 'email', ?, 'free', datetime('now'))`
+      )
+      .bind(userId, email, displayName || email.split('@')[0], passwordHash)
+      .run();
+
+    // Give welcome credits (50 starting)
+    await db
+      .prepare(
+        `INSERT INTO credit_transactions (transaction_id, user_id, transaction_type, credits_amount, balance_after, idempotency_key, reason, created_at)
+         VALUES (?, ?, 'BONUS', 50, 50, ?, 'Welcome bonus', datetime('now'))`
+      )
+      .bind(`tx_${Date.now()}`, userId, `welcome_${userId}`)
+      .run();
+
+    // Create session
+    const sessionId = generateId();
+    const token = await signJWT(
+      {
+        userId,
+        email,
+        isAdmin: false,
+        sessionId,
+      },
+      JWT_SECRET
+    );
+
+    await c.env.SESSIONS.put(
+      `session:${sessionId}`,
+      JSON.stringify({ userId, createdAt: Date.now() }),
+      { expirationTtl: 86400 }
+    );
+
+    return c.json({
+      token,
+      user: {
+        id: userId,
+        email,
+        displayName: displayName || email.split('@')[0],
+        isAdmin: false,
+      },
+    });
+  } catch (error: any) {
+    return c.json({ error: error.message || 'Registration failed' }, 500);
+  }
+});
+
+export default auth;
+export { auth };
