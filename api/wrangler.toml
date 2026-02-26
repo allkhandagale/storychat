@@ -1,0 +1,45 @@
+# StoryChat API - Worker Configuration
+name = "storychat-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-26"
+
+# D1 Database - Primary relational
+[[d1_databases]]
+binding = "DB"
+database_name = "storychat-db"
+
+[[d1_databases]]
+binding = "ANALYTICS"
+database_name = "storychat-analytics"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "SESSIONS"
+
+[[kv_namespaces]]
+binding = "RATELIMIT"
+
+# R2 Media Storage
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "storychat-media"
+
+# Secrets (set via: wrangler secret put SECRET_NAME)
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# JWT_SECRET
+# VAPID_PUBLIC_KEY
+# VAPID_PRIVATE_KEY
+# VAPID_SUBJECT
+
+[vars]
+ENVIRONMENT = "production"
+API_VERSION = "v1"
+CORS_ORIGIN = "https://storychat.pages.dev"
+JWT_EXPIRY_HOURS = "24"
+
+[env.development]
+vars = { ENVIRONMENT = "development", CORS_ORIGIN = "http://localhost:3000" }
+
+[env.staging]
+vars = { ENVIRONMENT = "staging", CORS_ORIGIN = "https://staging-storychat.pages.dev" }
