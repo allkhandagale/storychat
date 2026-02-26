@@ -7,17 +7,16 @@ compatibility_date = "2026-02-26"
 [[d1_databases]]
 binding = "DB"
 database_name = "storychat-db"
-
-[[d1_databases]]
-binding = "ANALYTICS"
-database_name = "storychat-analytics"
+database_id = "a17edd41-6a29-4d48-adb4-fe4e607e4963"
 
 # KV Namespaces
 [[kv_namespaces]]
 binding = "SESSIONS"
+id = "2c0ef1885e234658b13b87cea3474a36"
 
 [[kv_namespaces]]
 binding = "RATELIMIT"
+id = "c3c5ac1c6c5b4f69918912a4ac43a246"
 
 # R2 Media Storage
 [[r2_buckets]]

@@ -15,13 +15,17 @@ ENVIRONMENT = "development"
 [[d1_databases]]
 binding = "DB"
 database_name = "storychat-db"
-database_id = ""
+database_id = "a17edd41-6a29-4d48-adb4-fe4e607e4963"
 migrations_dir = "infra/d1/migrations"
 
-# KV Namespace for caching (create via: wrangler kv:namespace create "STORYCHAT_CACHE")
+# KV Namespaces
 [[kv_namespaces]]
-binding = "STORYCHAT_CACHE"
-id = ""
+binding = "SESSIONS"
+id = "2c0ef1885e234658b13b87cea3474a36"
+
+[[kv_namespaces]]
+binding = "RATELIMIT"
+id = "c3c5ac1c6c5b4f69918912a4ac43a246"
 
 # R2 Bucket for media storage (create via: wrangler r2 bucket create storychat-media)
 [[r2_buckets]]
